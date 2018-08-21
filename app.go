@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"strings"
 
 	"github.com/jacobsa/go-serial/serial"
@@ -12,16 +13,20 @@ import (
 
 // DgtApp is the main class-like struct for the application.
 type DgtApp struct {
+	log      *log.Logger
 	args     *DgtAppArgs
 	startFEN string
 	port     io.ReadWriteCloser
 	board    *DgtBoard
 	currGame *chess.Game
+	prevGame *chess.Game
 }
 
 func NewDgtApp(args *DgtAppArgs) *DgtApp {
 	return &DgtApp{
 		args: args,
+		log: log.New(os.Stdout, "[DGT] ",
+			log.Ldate|log.Ltime),
 	}
 }
 
@@ -41,7 +46,7 @@ func (a *DgtApp) getStartFEN() {
 }
 
 func (a *DgtApp) openPort() {
-	a.log("Opening port ...\n")
+	a.log.Println("Opening port ...")
 	options := serial.OpenOptions{
 		PortName:        a.args.Device,
 		BaudRate:        9600,
@@ -56,16 +61,16 @@ func (a *DgtApp) openPort() {
 }
 
 func (a *DgtApp) createBoard() {
-	a.log("Creating board ...\n")
+	a.log.Println("Creating board ...")
 	a.board = NewDgtBoard(a.port)
 }
 
 func (a *DgtApp) initialiseBoard() {
-	a.log("Starting byte reader ...\n")
+	a.log.Println("Starting byte reader ...")
 	a.board.startByteReader()
-	a.log("Starting command processor ...\n")
+	a.log.Println("Starting command processor ...")
 	a.board.startCommandProcessor()
-	a.log("Resetting board ...\n")
+	a.log.Println("Resetting board ...")
 	_, err := a.board.WriteSendResetCommand()
 	a.check(err)
 	_, err = a.board.WriteSendBoardCommand()
@@ -89,7 +94,7 @@ func (a *DgtApp) processBoardMessage(bm *BoardMessage) {
 	} else if bm.fieldUpdate != nil {
 		a.handleFieldUpdate(bm.fieldUpdate)
 	} else {
-		a.log(bm.unhandledMessage + "\n")
+		a.log.Println(bm.unhandledMessage)
 	}
 }
 
@@ -102,10 +107,10 @@ func (a *DgtApp) handleBoardDumpFEN(boardDumpFEN string) {
 
 	if a.currGame == nil {
 		if boardDumpFEN == a.startFEN {
-			log.Print("New Game Started!")
+			a.log.Println("New Game Started!")
 			a.currGame = chess.NewGame()
 		} else {
-			a.log("Pieces not in position yet.\n")
+			a.log.Println("Pieces not in position yet.")
 		}
 		return
 	}
@@ -120,29 +125,69 @@ func (a *DgtApp) handleBoardDumpFEN(boardDumpFEN string) {
 
 		if miniFEN == boardDumpFEN {
 			// We've matched a valid move!
+			a.prevGame = a.currGame.Clone()
 			err := a.currGame.Move(candidateMove)
 			if err != nil {
-				a.log(err.Error())
+				a.log.Println(err.Error())
 				return
 			}
-			a.log("Accepted move: %s\n", candidateMove)
+			a.log.Printf("Accepted move: %s\n", candidateMove)
 			a.printGameInfo()
 			return
 		}
 	}
 
-	a.log("Not a move.\n")
-	fmt.Println(a.currGame.Position().String())
-	// Print out the diffs to help backtrack.
+	// If we failed to find a valid move from the current
+	// position, it's possible that it's a valid continuation from
+	// the previous position. This can happen when a piece is slid
+	// across several squares slowly enough that its presence in
+	// one of the squares is accepted as a move, and all
+	// subsequent moves are rejected. In this case, we have to
+	// see if the new position is a valid move from the previous
+	// position.
+
+	if a.prevGame != nil {
+		prevPos := a.prevGame.Position()
+		validMoves := a.prevGame.ValidMoves()
+
+		for _, candidateMove := range validMoves {
+			candidatePos := prevPos.Update(candidateMove)
+			candidateFEN := candidatePos.String()
+			miniFEN := strings.Fields(candidateFEN)[0]
+
+			if miniFEN == boardDumpFEN {
+				// We've matched a valid move! However,
+				// in this case, we update the current
+				// game to be the previous game and then
+				// apply the move to that. Note that we
+				// keep prevGame unchanged, in case we
+				// need to do this several times.
+				a.currGame = a.prevGame.Clone()
+				err := a.currGame.Move(candidateMove)
+				if err != nil {
+					a.log.Println(err.Error())
+					return
+				}
+				a.log.Printf("Accepted move: %s\n", candidateMove)
+				a.printGameInfo()
+				return
+			}
+		}
+	}
+
+	a.log.Println("Not a move.")
+	a.log.Printf("Current board state: %s\n", boardDumpFEN)
+	a.log.Println("Last valid position was")
+	a.printGameInfo()
+	a.log.Println("Diffs to last valid position:")
 	a.printBoardDiffs(boardDumpFEN)
-	// a.printGameInfo()
 }
 
 func (a *DgtApp) printBoardDiffs(boardDumpFEN string) {
 	logicalBoard := a.currGame.Position().Board()
 	physicalFEN, err := chess.FEN(boardDumpFEN + " w KQkq - 0 1")
 	if err != nil {
-		a.log("Board is in illegal position.\n")
+		a.log.Println("Board is in illegal position.")
 		return
 	}
 	physicalGame := chess.NewGame(physicalFEN)
@@ -157,7 +202,7 @@ func (a *DgtApp) printBoardDiffs(boardDumpFEN string) {
 			physicalPiece := physicalBoard.Piece(square)
 
 			if logicalPiece != physicalPiece {
-				a.log("In %s, want %s have %s\n",
+				a.log.Printf("In %s, want %s have %s\n",
 					square, logicalPiece, physicalPiece)
 			}
 		}
@@ -192,8 +237,4 @@ func (a *DgtApp) check(err error) {
 	if err != nil {
 		log.Fatal(err)
 	}
-}
-
-func (a *DgtApp) log(format string, args ...interface{}) {
-	fmt.Printf(format, args)
 }
