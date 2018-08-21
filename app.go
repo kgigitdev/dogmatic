@@ -16,7 +16,7 @@ type DgtApp struct {
 	startFEN string
 	port     io.ReadWriteCloser
 	board    *DgtBoard
-	game     *chess.Game
+	currGame *chess.Game
 }
 
 func NewDgtApp(args *DgtAppArgs) *DgtApp {
@@ -41,7 +41,7 @@ func (a *DgtApp) getStartFEN() {
 }
 
 func (a *DgtApp) openPort() {
-	log.Println("Opening port ...")
+	a.log("Opening port ...\n")
 	options := serial.OpenOptions{
 		PortName:        a.args.Device,
 		BaudRate:        9600,
@@ -56,16 +56,16 @@ func (a *DgtApp) openPort() {
 }
 
 func (a *DgtApp) createBoard() {
-	log.Println("Creating board ...")
+	a.log("Creating board ...\n")
 	a.board = NewDgtBoard(a.port)
 }
 
 func (a *DgtApp) initialiseBoard() {
-	log.Println("Starting byte reader ...")
+	a.log("Starting byte reader ...\n")
 	a.board.startByteReader()
-	log.Println("Starting command processor ...")
+	a.log("Starting command processor ...\n")
 	a.board.startCommandProcessor()
-	log.Println("Resetting board ...")
+	a.log("Resetting board ...\n")
 	_, err := a.board.WriteSendResetCommand()
 	a.check(err)
 	_, err = a.board.WriteSendBoardCommand()
@@ -89,7 +89,7 @@ func (a *DgtApp) processBoardMessage(bm *BoardMessage) {
 	} else if bm.fieldUpdate != nil {
 		a.handleFieldUpdate(bm.fieldUpdate)
 	} else {
-		log.Println(bm.unhandledMessage)
+		a.log(bm.unhandledMessage + "\n")
 	}
 }
 
@@ -100,18 +100,18 @@ func (a *DgtApp) handleBoardDumpFEN(boardDumpFEN string) {
 	// started the game yet and the FEN is the starting FEN,
 	// start the game.
 
-	if a.game == nil {
+	if a.currGame == nil {
 		if boardDumpFEN == a.startFEN {
 			log.Print("New Game Started!")
-			a.game = chess.NewGame()
+			a.currGame = chess.NewGame()
 		} else {
-			log.Print("Pieces not in position yet.")
+			a.log("Pieces not in position yet.\n")
 		}
 		return
 	}
 
-	currPos := a.game.Position()
-	validMoves := a.game.ValidMoves()
+	currPos := a.currGame.Position()
+	validMoves := a.currGame.ValidMoves()
 
 	for _, candidateMove := range validMoves {
 		candidatePos := currPos.Update(candidateMove)
@@ -120,29 +120,29 @@ func (a *DgtApp) handleBoardDumpFEN(boardDumpFEN string) {
 
 		if miniFEN == boardDumpFEN {
 			// We've matched a valid move!
-			err := a.game.Move(candidateMove)
+			err := a.currGame.Move(candidateMove)
 			if err != nil {
-				log.Println(err)
+				a.log(err.Error())
 				return
 			}
-			log.Printf("Accepted move: %s\n", candidateMove)
+			a.log("Accepted move: %s\n", candidateMove)
 			a.printGameInfo()
 			return
 		}
 	}
 
-	log.Printf("Not a move!")
-
+	a.log("Not a move.\n")
+	fmt.Println(a.currGame.Position().String())
 	// Print out the diffs to help backtrack.
 	a.printBoardDiffs(boardDumpFEN)
 	// a.printGameInfo()
 }
 
 func (a *DgtApp) printBoardDiffs(boardDumpFEN string) {
-	logicalBoard := a.game.Position().Board()
+	logicalBoard := a.currGame.Position().Board()
 	physicalFEN, err := chess.FEN(boardDumpFEN + " w KQkq - 0 1")
 	if err != nil {
-		log.Println("Board is in illegal position.")
+		a.log("Board is in illegal position.\n")
 		return
 	}
 	physicalGame := chess.NewGame(physicalFEN)
@@ -157,7 +157,7 @@ func (a *DgtApp) printBoardDiffs(boardDumpFEN string) {
 			physicalPiece := physicalBoard.Piece(square)
 
 			if logicalPiece != physicalPiece {
-				log.Printf("In %s, want %s have %s\n",
+				a.log("In %s, want %s have %s\n",
 					square, logicalPiece, physicalPiece)
 			}
 		}
@@ -165,9 +165,9 @@ func (a *DgtApp) printBoardDiffs(boardDumpFEN string) {
 }
 
 func (a *DgtApp) printGameInfo() {
-	fmt.Println(a.game.Position().String())
-	fmt.Println(a.game)
-	fmt.Println(a.game.Position().Board().Draw())
+	fmt.Println(a.currGame.Position().String())
+	fmt.Println(a.currGame)
+	fmt.Println(a.currGame.Position().Board().Draw())
 }
 
 func (a *DgtApp) handleFieldUpdate(fieldUpdate *FieldUpdate) {
@@ -192,4 +192,8 @@ func (a *DgtApp) check(err error) {
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+func (a *DgtApp) log(format string, args ...interface{}) {
+	fmt.Printf(format, args)
 }
